@@ -16,14 +16,14 @@ AVATAR_SHIFT_Y = 0
 AVATAR_SHIFT_X = 0  
 
 BANNER_START_X = 0.25
-
 BANNER_START_Y = 0.29
-
 BANNER_END_X = 0.81
-
 BANNER_END_Y = 0.65
 
 # ========================================================================
+
+API_KEY = "STK"  # Sua chave da API
+INFO_API_URL = "http://freefireapi.com.br/api/player"
 
 # ================= Lifespan =================
 @asynccontextmanager
@@ -41,7 +41,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-INFO_API_URL = "https://fffinfo.tsunstudio.pw/get"
 BASE64 = "aHR0cHM6Ly9jZG4uanNkZWxpdnIubmV0L2doL1NoYWhHQ3JlYXRvci9pY29uQG1haW4vUE5H"
 info_URL = base64.b64decode(BASE64).decode('utf-8')
 
@@ -198,28 +197,37 @@ async def get_banner(uid: str):
     if not uid:
         raise HTTPException(status_code=400, detail="UID required")
 
-    resp = await client.get(f"{INFO_API_URL}?uid={uid}")
+    # Buscar dados da nova API
+    resp = await client.get(f"{INFO_API_URL}?id={uid}&region=BR&key={API_KEY}")
     if resp.status_code != 200:
         raise HTTPException(status_code=502, detail="Info API Error")
 
     data = resp.json()
-    account = data.get("AccountInfo", {})
-    equip = data.get("EquippedItemsInfo", {})
-    guild = data.get("GuildInfo", {})
-
-    if not account:
+    
+    if not data.get("success"):
         raise HTTPException(status_code=404, detail="Account not found")
 
-    avatar_task = fetch_image_bytes(equip.get("EquippedAvatarId"))
-    banner_task = fetch_image_bytes(equip.get("EquippedBannerId"))
-    pin_task = fetch_image_bytes(equip.get("pinId"))
+    player_data = data.get("data", {})
+    basic_info = player_data.get("basicInfo", {})
+    profile_info = player_data.get("profileInfo", {})
+    clan_info = player_data.get("clanBasicInfo", {})
+
+    # Extrair os IDs necessários
+    avatar_id = profile_info.get("avatarId", "0")
+    banner_id = basic_info.get("bannerId", "0")
+    pin_id = basic_info.get("badgeId", "0")  # Usando badgeId como pin
+
+    # Buscar imagens
+    avatar_task = fetch_image_bytes(avatar_id)
+    banner_task = fetch_image_bytes(banner_id)
+    pin_task = fetch_image_bytes(pin_id)
 
     avatar, banner, pin = await asyncio.gather(avatar_task, banner_task, pin_task)
 
     banner_data = {
-        "AccountLevel": account.get("AccountLevel", "0"),
-        "AccountName": account.get("AccountName", "Unknown"),
-        "GuildName": guild.get("GuildName", "")
+        "AccountLevel": basic_info.get("level", "0"),
+        "AccountName": basic_info.get("nickname", "Unknown"),
+        "GuildName": clan_info.get("clanName", "")
     }
 
     loop = asyncio.get_event_loop()
