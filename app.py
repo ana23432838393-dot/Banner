@@ -209,13 +209,16 @@ async def get_banner(uid: str):
 
     player_data = data.get("data", {})
     basic_info = player_data.get("basicInfo", {})
-    profile_info = player_data.get("profileInfo", {})
     clan_info = player_data.get("clanBasicInfo", {})
 
     # Extrair os IDs necessários
-    avatar_id = profile_info.get("avatarId", "0")
+    avatar_id = basic_info.get("headPic", "0")  # CORRIGIDO: headPic é o avatar
     banner_id = basic_info.get("bannerId", "0")
     pin_id = basic_info.get("badgeId", "0")  # Usando badgeId como pin
+
+    print(f"Avatar ID: {avatar_id}")  # Debug
+    print(f"Banner ID: {banner_id}")  # Debug
+    print(f"Pin ID: {pin_id}")  # Debug
 
     # Buscar imagens
     avatar_task = fetch_image_bytes(avatar_id)
