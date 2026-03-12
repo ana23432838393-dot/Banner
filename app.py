@@ -24,6 +24,10 @@ BANNER_END_Y = 0.65
 
 API_KEY = "STK"  # Sua chave da API
 INFO_API_URL = "http://freefireapi.com.br/api/player"
+CDN_BASE_URL = "https://dl.cdn.freefiremobile.com/live/ABHotUpdates/IconCDN/other"
+
+# Banner padrão caso não seja encontrado
+DEFAULT_BANNER_ID = "900000014"
 
 # ================= Lifespan =================
 @asynccontextmanager
@@ -40,9 +44,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-BASE64 = "aHR0cHM6Ly9jZG4uanNkZWxpdnIubmV0L2doL1NoYWhHQ3JlYXRvci9pY29uQG1haW4vUE5H"
-info_URL = base64.b64decode(BASE64).decode('utf-8')
 
 FONT_FILE = "arial_unicode_bold.otf"
 FONT_CHEROKEE = "NotoSansCherokee.ttf"
@@ -64,21 +65,40 @@ def load_unicode_font(size, font_file=FONT_FILE):
         pass
     return ImageFont.load_default()
 
-async def fetch_image_bytes(item_id):
+async def fetch_image_bytes(item_id, is_banner=False):
+    """Busca imagem da CDN com fallback para banner padrão"""
     if not item_id or str(item_id) == "0":
-        return None
-    url = f"{info_URL}/{item_id}.png"
+        if is_banner:
+            # Se for banner e não tiver ID, usar o banner padrão
+            item_id = DEFAULT_BANNER_ID
+        else:
+            return None
+    
+    # URL da CDN conforme especificado
+    url = f"{CDN_BASE_URL}/{item_id}.png"
+    
     try:
         resp = await client.get(url)
         if resp.status_code == 200 and resp.content:
             return resp.content
-    except:
-        pass
+        elif is_banner and str(item_id) != DEFAULT_BANNER_ID:
+            # Se falhou ao buscar o banner específico, tentar o padrão
+            print(f"Falha ao buscar banner {item_id}, tentando padrão...")
+            return await fetch_image_bytes(DEFAULT_BANNER_ID, True)
+    except Exception as e:
+        print(f"Erro ao buscar imagem {item_id}: {e}")
+        if is_banner and str(item_id) != DEFAULT_BANNER_ID:
+            # Em caso de erro, tentar o banner padrão
+            return await fetch_image_bytes(DEFAULT_BANNER_ID, True)
+    
     return None
 
 def bytes_to_image(img_bytes):
     if img_bytes:
-        return Image.open(io.BytesIO(img_bytes)).convert("RGBA")
+        try:
+            return Image.open(io.BytesIO(img_bytes)).convert("RGBA")
+        except:
+            pass
     return Image.new("RGBA", (100, 100), (0, 0, 0, 0))
 
 # ================= IMAGE PROCESS =================
@@ -212,20 +232,25 @@ async def get_banner(uid: str):
     clan_info = player_data.get("clanBasicInfo", {})
 
     # Extrair os IDs necessários
-    avatar_id = basic_info.get("headPic", "0")  # CORRIGIDO: headPic é o avatar
-    banner_id = basic_info.get("bannerId", "0")
-    pin_id = basic_info.get("badgeId", "0")  # Usando badgeId como pin
+    avatar_id = basic_info.get("headPic", "0")
+    banner_id = basic_info.get("bannerId")
+    pin_id = basic_info.get("badgeId", "0")
 
-    print(f"Avatar ID: {avatar_id}")  # Debug
-    print(f"Banner ID: {banner_id}")  # Debug
-    print(f"Pin ID: {pin_id}")  # Debug
+    print(f"Avatar ID: {avatar_id}")
+    print(f"Banner ID: {banner_id}")
+    print(f"Pin ID: {pin_id}")
 
-    # Buscar imagens
-    avatar_task = fetch_image_bytes(avatar_id)
-    banner_task = fetch_image_bytes(banner_id)
-    pin_task = fetch_image_bytes(pin_id)
+    # Buscar imagens - banner pode ser None, então passamos is_banner=True
+    avatar_task = fetch_image_bytes(avatar_id, is_banner=False)
+    banner_task = fetch_image_bytes(banner_id, is_banner=True)  # Importante: is_banner=True
+    pin_task = fetch_image_bytes(pin_id, is_banner=False)
 
     avatar, banner, pin = await asyncio.gather(avatar_task, banner_task, pin_task)
+
+    # Verificar se o banner foi obtido com sucesso
+    if not banner:
+        print("Banner não encontrado, usando padrão...")
+        banner = await fetch_image_bytes(DEFAULT_BANNER_ID, is_banner=True)
 
     banner_data = {
         "AccountLevel": basic_info.get("level", "0"),
