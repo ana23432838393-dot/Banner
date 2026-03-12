@@ -6,7 +6,7 @@ import base64
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Response, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, ImageFilter
 from concurrent.futures import ThreadPoolExecutor
 
 # ================= ADJUSTMENT SETTINGS =================
@@ -30,7 +30,11 @@ IMAGE_BASE_URL = "https://dl.cdn.freefiremobile.com/live/ABHotUpdates/IconCDN/ot
 
 # IDs padrão
 DEFAULT_BANNER_ID = "900000014"
-DEFAULT_AVATAR_ID = "900000014"  # Avatar padrão caso não encontre
+DEFAULT_AVATAR_ID = "900000014"
+
+# Qualidade da imagem
+TARGET_HEIGHT = 800  # Aumentado para melhor qualidade (era 400)
+TARGET_QUALITY = 95  # Qualidade de salvamento
 
 # ================= Lifespan =================
 @asynccontextmanager
@@ -72,9 +76,8 @@ def load_unicode_font(size, font_file=FONT_FILE):
     return ImageFont.load_default()
 
 async def fetch_image_bytes(item_id, is_avatar=False):
-    """Busca imagem da nova URL base"""
+    """Busca imagem da nova URL base com alta qualidade"""
     if not item_id or str(item_id) == "0":
-        # Se for avatar e não tiver ID, usa o padrão
         if is_avatar:
             item_id = DEFAULT_AVATAR_ID
         else:
@@ -100,80 +103,100 @@ async def fetch_image_bytes(item_id, is_avatar=False):
     
     return None
 
-def bytes_to_image(img_bytes):
+def bytes_to_image(img_bytes, high_quality=True):
+    """Converte bytes para imagem com opção de alta qualidade"""
     if img_bytes:
-        return Image.open(io.BytesIO(img_bytes)).convert("RGBA")
+        img = Image.open(io.BytesIO(img_bytes)).convert("RGBA")
+        # Aplicar filtro de suavização se necessário
+        if high_quality and img.size[0] < 200:
+            img = img.filter(ImageFilter.SMOOTH_MORE)
+        return img
     return Image.new("RGBA", (100, 100), (0, 0, 0, 0))
+
+def resize_image_high_quality(img, target_size, is_banner=False):
+    """Redimensiona imagem com alta qualidade"""
+    original_w, original_h = img.size
+    
+    # Calcular proporção
+    ratio = target_size / original_h
+    new_w = int(original_w * ratio)
+    
+    # Usar LANCZOS para melhor qualidade
+    if is_banner:
+        # Para banners, usar redimensionamento progressivo para melhor qualidade
+        img = img.resize((new_w, target_size), Image.Resampling.LANCZOS)
+    else:
+        # Para avatares, redimensionar mantendo qualidade
+        img = img.resize((new_w, target_size), Image.Resampling.LANCZOS)
+    
+    return img
 
 # ================= IMAGE PROCESS =================
 def process_banner_image(data, avatar_bytes, banner_bytes, pin_bytes):
-    avatar_img = bytes_to_image(avatar_bytes)
-    banner_img = bytes_to_image(banner_bytes)
-    pin_img = bytes_to_image(pin_bytes)
+    avatar_img = bytes_to_image(avatar_bytes, high_quality=True)
+    banner_img = bytes_to_image(banner_bytes, high_quality=True)
+    pin_img = bytes_to_image(pin_bytes, high_quality=True)
 
     level = str(data.get("AccountLevel", "0"))
     name = data.get("AccountName", "Unknown")
     guild = data.get("GuildName", "")
 
-    TARGET_HEIGHT = 400
+    global TARGET_HEIGHT
 
-    # ================= AVATAR PROCESSING (SEM RECORTE) =================
+    # ================= AVATAR PROCESSING (ALTA QUALIDADE) =================
     
-    # Redimensionar avatar mantendo proporção para caber na altura alvo
-    av_original_w, av_original_h = avatar_img.size
-    
-    # Calcular nova altura mantendo proporção
-    if av_original_h > 0:
-        scale_factor = TARGET_HEIGHT / av_original_h
-        new_width = int(av_original_w * scale_factor)
-        avatar_img = avatar_img.resize((new_width, TARGET_HEIGHT), Image.LANCZOS)
-    else:
-        avatar_img = avatar_img.resize((TARGET_HEIGHT, TARGET_HEIGHT), Image.LANCZOS)
-    
+    # Redimensionar avatar com alta qualidade
+    avatar_img = resize_image_high_quality(avatar_img, TARGET_HEIGHT, is_banner=False)
     av_w, av_h = avatar_img.size
     # ================================================================
 
-    # Process Banner (se não tiver banner, usa o padrão)
+    # Process Banner (alta qualidade)
     if banner_img.size == (100, 100) and banner_bytes is None:
-        # Se for a imagem padrão (100x100) e não tem banner, tenta buscar o banner padrão
-        banner_img = bytes_to_image(banner_bytes)  # Já deve ser o padrão
+        banner_img = bytes_to_image(banner_bytes)
     
     b_w, b_h = banner_img.size
     if b_w > 50 and b_h > 50:
-        banner_img = banner_img.rotate(3, expand=True)
+        # Rotacionar com alta qualidade
+        banner_img = banner_img.rotate(3, expand=True, resample=Image.Resampling.BICUBIC)
         b_w, b_h = banner_img.size
         
-        # ================= NEW NAMED CROP LOGIC =================
+        # Crop com precisão
         crop_left = b_w * BANNER_START_X
         crop_top = b_h * BANNER_START_Y
         crop_right = b_w * BANNER_END_X
         crop_bottom = b_h * BANNER_END_Y
 
         banner_img = banner_img.crop((
-            crop_left,
-            crop_top,
-            crop_right,
-            crop_bottom
+            int(crop_left),
+            int(crop_top),
+            int(crop_right),
+            int(crop_bottom)
         ))
-        # ========================================================
 
     b_w, b_h = banner_img.size
-    new_banner_w = int(TARGET_HEIGHT * (b_w / b_h) * 2) if b_h else 800
-    banner_img = banner_img.resize((new_banner_w, TARGET_HEIGHT), Image.LANCZOS)
-
-    final_w = av_w + new_banner_w
-    combined = Image.new("RGBA", (final_w, TARGET_HEIGHT))
+    # Redimensionar banner com alta qualidade
+    new_banner_w = int(TARGET_HEIGHT * (b_w / b_h) * 2) if b_h else TARGET_HEIGHT * 2
+    banner_img = resize_image_high_quality(banner_img, TARGET_HEIGHT, is_banner=True)
     
-    combined.paste(avatar_img, (0, 0))
-    combined.paste(banner_img, (av_w, 0))
+    # Ajustar largura do banner se necessário
+    if banner_img.size[0] < new_banner_w:
+        banner_img = banner_img.resize((new_banner_w, TARGET_HEIGHT), Image.Resampling.LANCZOS)
+
+    final_w = av_w + banner_img.size[0]
+    combined = Image.new("RGBA", (final_w, TARGET_HEIGHT), (0, 0, 0, 0))
+    
+    # Colar imagens com máscara para transparência
+    combined.paste(avatar_img, (0, 0), avatar_img if avatar_img.mode == 'RGBA' else None)
+    combined.paste(banner_img, (av_w, 0), banner_img if banner_img.mode == 'RGBA' else None)
 
     draw = ImageDraw.Draw(combined)
 
-    font_large = load_unicode_font(125)
-    font_large_cherokee = load_unicode_font(125, FONT_CHEROKEE)
-    font_small = load_unicode_font(95)
-    font_small_cherokee = load_unicode_font(95, FONT_CHEROKEE)
-    font_level = load_unicode_font(50)
+    # Fontes maiores para melhor qualidade
+    font_large = load_unicode_font(250)  # Aumentado (era 125)
+    font_large_cherokee = load_unicode_font(250, FONT_CHEROKEE)
+    font_small = load_unicode_font(190)  # Aumentado (era 95)
+    font_small_cherokee = load_unicode_font(190, FONT_CHEROKEE)
+    font_level = load_unicode_font(100)  # Aumentado (era 50)
 
     def is_cherokee(c):
         return 0x13A0 <= ord(c) <= 0x13FF or 0xAB70 <= ord(c) <= 0xABBF
@@ -182,40 +205,60 @@ def process_banner_image(data, avatar_bytes, banner_bytes, pin_bytes):
         cx = x
         for ch in text:
             f = f_alt if is_cherokee(ch) else f_main
+            # Stroke mais suave para texto em alta qualidade
             for dx in range(-stroke, stroke + 1):
                 for dy in range(-stroke, stroke + 1):
                     draw.text((cx + dx, y + dy), ch, font=f, fill="black")
             draw.text((cx, y), ch, font=f, fill="white")
             cx += f.getlength(ch)
 
-    draw_text(av_w + 65, 40, name, font_large, font_large_cherokee, 4)
-    draw_text(av_w + 65, 220, guild, font_small, font_small_cherokee, 3)
+    # Ajustar posições para a nova escala
+    draw_text(av_w + 130, 80, name, font_large, font_large_cherokee, 8)  # Posições ajustadas
+    draw_text(av_w + 130, 440, guild, font_small, font_small_cherokee, 6)
 
+    # Processar PIN com alta qualidade
     if pin_img.size != (100, 100):
-        pin_img = pin_img.resize((130, 130), Image.LANCZOS)
-        combined.paste(pin_img, (0, TARGET_HEIGHT - 130), pin_img)
+        pin_size = int(260 * (TARGET_HEIGHT / 400))  # Escalar proporcionalmente
+        pin_img = pin_img.resize((pin_size, pin_size), Image.Resampling.LANCZOS)
+        combined.paste(pin_img, (0, TARGET_HEIGHT - pin_size), pin_img)
 
+    # Nível com melhor qualidade
     lvl_text = f"Lvl.{level}"
     w, h = draw.textbbox((0, 0), lvl_text, font=font_level)[2:]
+    
+    # Fundo mais suave para o texto do nível
+    padding = 20
     draw.rectangle(
-        [final_w - w - 60, TARGET_HEIGHT - h - 50, final_w, TARGET_HEIGHT],
+        [final_w - w - 120, TARGET_HEIGHT - h - 100, final_w + padding, TARGET_HEIGHT + padding],
         fill="black"
     )
+    # Borda mais suave
+    for i in range(3):
+        draw.text(
+            (final_w - w - 60 + i, TARGET_HEIGHT - h - 80 + i),
+            lvl_text,
+            font=font_level,
+            fill="black"
+        )
     draw.text(
-        (final_w - w - 30, TARGET_HEIGHT - h - 40),
+        (final_w - w - 60, TARGET_HEIGHT - h - 80),
         lvl_text,
         font=font_level,
         fill="white"
     )
 
+    # Aplicar filtro de nitidez final
+    combined = combined.filter(ImageFilter.SHARPEN)
+
     img_io = io.BytesIO()
-    combined.save(img_io, "PNG")
+    # Salvar com alta qualidade
+    combined.save(img_io, "PNG", optimize=True, quality=TARGET_QUALITY)
     img_io.seek(0)
     return img_io
 
 @app.get("/")
 async def home():
-    return {"status": "Banner API Running", "endpoint": "/profile?uid=UID"}
+    return {"status": "Banner API Running (High Quality)", "endpoint": "/profile?uid=UID"}
 
 @app.get("/profile")
 async def get_banner(uid: str):
