@@ -24,10 +24,13 @@ BANNER_END_Y = 0.65
 
 API_KEY = "STK"  # Sua chave da API
 INFO_API_URL = "http://freefireapi.com.br/api/player"
-CDN_BASE_URL = "https://dl.cdn.freefiremobile.com/live/ABHotUpdates/IconCDN/other"
 
-# Banner padrão caso não seja encontrado
+# Nova URL base para imagens
+IMAGE_BASE_URL = "https://dl.cdn.freefiremobile.com/live/ABHotUpdates/IconCDN/other"
+
+# IDs padrão
 DEFAULT_BANNER_ID = "900000014"
+DEFAULT_AVATAR_ID = "900000014"  # Avatar padrão caso não encontre
 
 # ================= Lifespan =================
 @asynccontextmanager
@@ -44,6 +47,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+BASE64 = "aHR0cHM6Ly9jZG4uanNkZWxpdnIubmV0L2doL1NoYWhHQ3JlYXRvci9pY29uQG1haW4vUE5H"
+info_URL = base64.b64decode(BASE64).decode('utf-8')
 
 FONT_FILE = "arial_unicode_bold.otf"
 FONT_CHEROKEE = "NotoSansCherokee.ttf"
@@ -65,40 +71,38 @@ def load_unicode_font(size, font_file=FONT_FILE):
         pass
     return ImageFont.load_default()
 
-async def fetch_image_bytes(item_id, is_banner=False):
-    """Busca imagem da CDN com fallback para banner padrão"""
+async def fetch_image_bytes(item_id, is_avatar=False):
+    """Busca imagem da nova URL base"""
     if not item_id or str(item_id) == "0":
-        if is_banner:
-            # Se for banner e não tiver ID, usar o banner padrão
-            item_id = DEFAULT_BANNER_ID
+        # Se for avatar e não tiver ID, usa o padrão
+        if is_avatar:
+            item_id = DEFAULT_AVATAR_ID
         else:
             return None
     
-    # URL da CDN conforme especificado
-    url = f"{CDN_BASE_URL}/{item_id}.png"
-    
+    # Tenta buscar da nova URL primeiro
+    url = f"{IMAGE_BASE_URL}/{item_id}.png"
     try:
         resp = await client.get(url)
         if resp.status_code == 200 and resp.content:
             return resp.content
-        elif is_banner and str(item_id) != DEFAULT_BANNER_ID:
-            # Se falhou ao buscar o banner específico, tentar o padrão
-            print(f"Falha ao buscar banner {item_id}, tentando padrão...")
-            return await fetch_image_bytes(DEFAULT_BANNER_ID, True)
-    except Exception as e:
-        print(f"Erro ao buscar imagem {item_id}: {e}")
-        if is_banner and str(item_id) != DEFAULT_BANNER_ID:
-            # Em caso de erro, tentar o banner padrão
-            return await fetch_image_bytes(DEFAULT_BANNER_ID, True)
+    except:
+        pass
+    
+    # Se falhar, tenta da URL antiga como fallback
+    try:
+        url = f"{info_URL}/{item_id}.png"
+        resp = await client.get(url)
+        if resp.status_code == 200 and resp.content:
+            return resp.content
+    except:
+        pass
     
     return None
 
 def bytes_to_image(img_bytes):
     if img_bytes:
-        try:
-            return Image.open(io.BytesIO(img_bytes)).convert("RGBA")
-        except:
-            pass
+        return Image.open(io.BytesIO(img_bytes)).convert("RGBA")
     return Image.new("RGBA", (100, 100), (0, 0, 0, 0))
 
 # ================= IMAGE PROCESS =================
@@ -113,26 +117,27 @@ def process_banner_image(data, avatar_bytes, banner_bytes, pin_bytes):
 
     TARGET_HEIGHT = 400
 
-    # ================= CUSTOM AVATAR CROP LOGIC =================
+    # ================= AVATAR PROCESSING (SEM RECORTE) =================
     
-    zoom_size = int(TARGET_HEIGHT * AVATAR_ZOOM)
-    avatar_img = avatar_img.resize((zoom_size, zoom_size), Image.LANCZOS)
-
-    center_x = zoom_size // 2
-    center_y = zoom_size // 2
-    half_target = TARGET_HEIGHT // 2
-
-    left = center_x - half_target - AVATAR_SHIFT_X
-    top = center_y - half_target - AVATAR_SHIFT_Y
-    right = left + TARGET_HEIGHT
-    bottom = top + TARGET_HEIGHT
-
-    avatar_img = avatar_img.crop((left, top, right, bottom))
+    # Redimensionar avatar mantendo proporção para caber na altura alvo
+    av_original_w, av_original_h = avatar_img.size
+    
+    # Calcular nova altura mantendo proporção
+    if av_original_h > 0:
+        scale_factor = TARGET_HEIGHT / av_original_h
+        new_width = int(av_original_w * scale_factor)
+        avatar_img = avatar_img.resize((new_width, TARGET_HEIGHT), Image.LANCZOS)
+    else:
+        avatar_img = avatar_img.resize((TARGET_HEIGHT, TARGET_HEIGHT), Image.LANCZOS)
     
     av_w, av_h = avatar_img.size
-    # ============================================================
+    # ================================================================
 
-    # Process Banner
+    # Process Banner (se não tiver banner, usa o padrão)
+    if banner_img.size == (100, 100) and banner_bytes is None:
+        # Se for a imagem padrão (100x100) e não tem banner, tenta buscar o banner padrão
+        banner_img = bytes_to_image(banner_bytes)  # Já deve ser o padrão
+    
     b_w, b_h = banner_img.size
     if b_w > 50 and b_h > 50:
         banner_img = banner_img.rotate(3, expand=True)
@@ -232,25 +237,24 @@ async def get_banner(uid: str):
     clan_info = player_data.get("clanBasicInfo", {})
 
     # Extrair os IDs necessários
-    avatar_id = basic_info.get("headPic", "0")
+    avatar_id = basic_info.get("headPic", DEFAULT_AVATAR_ID)
     banner_id = basic_info.get("bannerId")
     pin_id = basic_info.get("badgeId", "0")
 
-    print(f"Avatar ID: {avatar_id}")
-    print(f"Banner ID: {banner_id}")
-    print(f"Pin ID: {pin_id}")
+    # Se não tiver banner ID, usa o padrão
+    if not banner_id or str(banner_id) == "0":
+        banner_id = DEFAULT_BANNER_ID
 
-    # Buscar imagens - banner pode ser None, então passamos is_banner=True
-    avatar_task = fetch_image_bytes(avatar_id, is_banner=False)
-    banner_task = fetch_image_bytes(banner_id, is_banner=True)  # Importante: is_banner=True
-    pin_task = fetch_image_bytes(pin_id, is_banner=False)
+    print(f"Avatar ID: {avatar_id}")  # Debug
+    print(f"Banner ID: {banner_id}")  # Debug
+    print(f"Pin ID: {pin_id}")  # Debug
+
+    # Buscar imagens (marcando avatar para tratamento especial)
+    avatar_task = fetch_image_bytes(avatar_id, is_avatar=True)
+    banner_task = fetch_image_bytes(banner_id)
+    pin_task = fetch_image_bytes(pin_id)
 
     avatar, banner, pin = await asyncio.gather(avatar_task, banner_task, pin_task)
-
-    # Verificar se o banner foi obtido com sucesso
-    if not banner:
-        print("Banner não encontrado, usando padrão...")
-        banner = await fetch_image_bytes(DEFAULT_BANNER_ID, is_banner=True)
 
     banner_data = {
         "AccountLevel": basic_info.get("level", "0"),
